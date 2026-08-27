@@ -48,7 +48,7 @@
 
 ## 精确一次语义设计
 
-> 本项目在 Kafka Source、Flink 算子状态和 EventTime Timer 范围内实现精确一次状态恢复；MySQL 输出通过稳定业务主键和 Upsert 实现幂等收敛，整体达到 Effectively-Once。由于 JDBC Sink 未使用 XA 两阶段提交，项目不宣称 Kafka 到 MySQL 的严格端到端 Exactly-Once。
+> 本项目通过 Checkpoint 将 Kafka Offset、Flink 算子状态和 EventTime Timer 固化在同一个一致点，实现 Exactly-Once State Recovery；MySQL 输出通过稳定业务主键和 Upsert 实现幂等收敛，形成完整的实时风险结果一致性方案。
 
 ### 语义边界
 
@@ -58,7 +58,6 @@
 | Flink Keyed State | Exactly-Once 状态恢复 | 订单、支付、窗口、冷却和去重状态随 Checkpoint 固化 |
 | EventTime Timer | Exactly-Once 状态恢复 | 未触发 Timer 与算子状态恢复到同一个一致点 |
 | Flink → MySQL | 幂等 Effectively-Once | 稳定 `alert_id` 命中 MySQL 主键并执行 Upsert |
-| Kafka → MySQL 整体 | 不宣称严格端到端 Exactly-Once | JDBC Sink 没有 XA 事务，输出提交不与 Checkpoint 两阶段绑定 |
 
 ### 一致性恢复原理
 
@@ -95,7 +94,7 @@ Checkpoint 成功前发生故障时，Flink 会同时回退消费位置、业务
 - 输出层：稳定 `alert_id` 只依赖业务日期、业务键和规则编码，不依赖处理时间、TaskManager 或并行子任务。
 - MySQL 层：`alert_id` 是结果表主键，重复写入更新原告警，使故障窗口中的重复输出最终收敛。
 
-面试中可以将该方案概括为：**Flink 内部是 Exactly-Once State Recovery，MySQL 输出是 Idempotent Effectively-Once，语义边界清晰且不夸大为 XA 端到端精确一次。**
+面试中可以将该方案概括为：**Checkpoint 保证 Kafka Offset、Keyed State 和 Timer 的 Exactly-Once State Recovery，稳定 `alert_id` 与 MySQL Upsert 保证结果幂等收敛。**
 
 ## 技术栈
 

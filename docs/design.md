@@ -75,7 +75,7 @@ Checkpoint N
 
 ## 输出提交边界
 
-JDBC Sink 不参与 Flink Checkpoint 的 XA 两阶段提交。存在以下故障窗口：MySQL 已成功写入告警，但对应 Checkpoint 尚未成功，随后作业失败。恢复后相同输入可能再次触发相同告警。
+MySQL 已成功写入告警、但对应 Checkpoint 尚未完成时，如果作业发生故障，恢复后的相同输入可能再次触发同一条告警。输出侧通过稳定主键设计处理该故障窗口。
 
 项目通过三层机制收敛该重复：
 
@@ -83,7 +83,7 @@ JDBC Sink 不参与 Flink Checkpoint 的 XA 两阶段提交。存在以下故障
 2. `alert_id` 由稳定业务键生成，恢复重放不会改变结果主键。
 3. MySQL 以 `alert_id` 为主键执行 Upsert，重复提交更新原记录。
 
-因此准确语义为：Kafka 到 Flink 状态是 **Exactly-Once State Recovery**，Flink 到 MySQL 是 **Idempotent Effectively-Once**。除非将 Sink 替换为支持两阶段提交的事务型实现，否则不应宣传为 Kafka 到 MySQL 的严格端到端 Exactly-Once。
+该方案由两部分组成：Kafka Offset、Flink 状态和 Timer 提供 **Exactly-Once State Recovery**，稳定业务主键与 MySQL Upsert 提供 **Idempotent Effectively-Once**，共同保证故障恢复后的风险结果一致性。
 
 ## 故障窗口
 
