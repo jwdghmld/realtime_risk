@@ -58,6 +58,38 @@ Timer 触发时按业务键找到对应成功支付，累计全部明细成交�
 
 单元测试覆盖订单四类违规判断、用户窗口归属和计数逻辑，以及时区和日期转换。Kafka Connector、Checkpoint 恢复与 MySQL JDBC 行为属于集成验证范围，应在与目标集群版本一致的环境中执行。
 
-## 一致性声明
+## 精确一次状态恢复
 
-Checkpoint 对 Kafka offset、Flink 状态和 Timer 提供一致恢复点。MySQL 使用稳定主键 Upsert 收敛重复输出，但 JDBC Sink 未启用 XA，因此故障窗口内允许同一结果重复写入，不允许宣传为严格端到端 Exactly-Once。
+两个作业均以 `CheckpointingMode.EXACTLY_ONCE` 每 60 秒生成恢复点。Kafka Source 的消费位置、Keyed State、去重集合和 EventTime Timer 属于同一个 Checkpoint；只有完整成功的 Checkpoint 才成为新的恢复基线。
+
+```text
+Checkpoint N
+├── Kafka Offset
+├── 订单或用户业务状态
+├── processed-events 去重状态
+├── 窗口与冷却标记
+└── 尚未触发的 EventTime Timer
+```
+
+发生故障时，作业不会分别恢复这些对象，而是从同一个成功 Checkpoint 整体恢复。这保证消费位置与规则上下文同步回退，避免 Offset 已确认但业务状态丢失。
+
+## 输出提交边界
+
+JDBC Sink 不参与 Flink Checkpoint 的 XA 两阶段提交。存在以下故障窗口：MySQL 已成功写入告警，但对应 Checkpoint 尚未成功，随后作业失败。恢复后相同输入可能再次触发相同告警。
+
+项目通过三层机制收敛该重复：
+
+1. `event_id` 在 Flink 状态中控制同一恢复周期内的输入重复。
+2. `alert_id` 由稳定业务键生成，恢复重放不会改变结果主键。
+3. MySQL 以 `alert_id` 为主键执行 Upsert，重复提交更新原记录。
+
+因此准确语义为：Kafka 到 Flink 状态是 **Exactly-Once State Recovery**，Flink 到 MySQL 是 **Idempotent Effectively-Once**。除非将 Sink 替换为支持两阶段提交的事务型实现，否则不应宣传为 Kafka 到 MySQL 的严格端到端 Exactly-Once。
+
+## 故障窗口
+
+| 故障点 | Offset | 状态与 Timer | MySQL 结果 |
+|---|---|---|---|
+| Checkpoint 前失败 | 回退 | 回退 | 未写入或由稳定主键收敛 |
+| Checkpoint 完成后失败 | 从新一致点恢复 | 从新一致点恢复 | 已确认结果保持 |
+| JDBC 成功、Checkpoint 失败 | 回退后重放 | 回退后重算 | 可能重复 Upsert，但不新增重复主键 |
+| 取消作业 | 取决于恢复入口 | 外部化 Checkpoint 保留 | 历史结果不删除 |

@@ -1,6 +1,6 @@
 # realtime_risk：电商实时交易风控
 
-基于 **Kafka、Flink 1.19.1、Java 17 和 MySQL** 构建的电商实时交易风控项目。系统同时消费订单、订单明细和支付事件，使用事件时间、Watermark、Keyed State 与 EventTime Timer 处理跨 Topic 乱序，识别订单时序、金额一致性和用户短周期行为风险，并将结构化告警写入 MySQL `realtime`。
+基于 **Kafka、Flink 1.19.1、Java 17 和 MySQL** 构建的电商实时交易风控项目。系统同时消费订单、订单明细和支付事件，使用事件时间、Watermark、Keyed State 与 EventTime Timer 处理跨 Topic 乱序，识别订单时序、金额一致性和用户短周期行为风险，并将结构化告警写入 MySQL `realtime`。项目核心工程能力是以 Checkpoint 将 Kafka 消费位置、算子状态和 Timer 固化在同一个一致点，实现 Flink 状态范围内的精确一次恢复。
 
 本仓库重点展示实时数据工程中的消息合同、乱序处理、有状态计算、定时器规则、故障恢复、幂等落库和一致性边界，适合作为 Flink 实时项目学习与面试交流材料。
 
@@ -13,7 +13,7 @@
 - 通过 `event_id`、状态 TTL 和稳定告警主键控制重复数据。
 - 将订单级风险和用户级风险拆成两个独立 Flink 作业。
 - 使用 EventTime Timer 等待迟到数据，并按业务时间完成判断。
-- 启用 Checkpoint、外部化保留和固定延迟重启，支持状态恢复。
+- 启用 Exactly-Once Checkpoint，将 Kafka Offset、Keyed State 和 Timer 恢复到同一个一致点。
 - 输出可查询、可筛选、可追溯的 MySQL 风险告警表。
 - 明确 Kafka、Flink 状态和 JDBC Sink 之间的一致性边界。
 
@@ -35,7 +35,7 @@
 
 ## 总体架构
 
-![电商实时交易风控总体架构](docs/images/realtime-system-architecture.svg)
+![电商实时交易风控总体架构](docs/images/realtime-system-architecture.png)
 
 实时链路从离线仓库的数据生成阶段接收有限批次交易事件，但两个仓库保持独立部署：
 
@@ -45,6 +45,57 @@
 4. `OrderRiskJob` 按 `order_id` 归并交易，`UserRiskJob` 按 `user_id` 聚合短周期行为。
 5. 两个作业使用独立消费组、状态和 Checkpoint 子目录。
 6. 告警通过 JDBC Upsert 写入 MySQL，Python 查询结果表供轻量页面展示。
+
+## 精确一次语义设计
+
+> 本项目在 Kafka Source、Flink 算子状态和 EventTime Timer 范围内实现精确一次状态恢复；MySQL 输出通过稳定业务主键和 Upsert 实现幂等收敛，整体达到 Effectively-Once。由于 JDBC Sink 未使用 XA 两阶段提交，项目不宣称 Kafka 到 MySQL 的严格端到端 Exactly-Once。
+
+### 语义边界
+
+| 链路范围 | 项目提供的语义 | 实现依据 |
+|---|---|---|
+| Kafka → Flink Source | Exactly-Once 状态恢复 | Kafka Offset 进入 Checkpoint，`enable.auto.commit=false` |
+| Flink Keyed State | Exactly-Once 状态恢复 | 订单、支付、窗口、冷却和去重状态随 Checkpoint 固化 |
+| EventTime Timer | Exactly-Once 状态恢复 | 未触发 Timer 与算子状态恢复到同一个一致点 |
+| Flink → MySQL | 幂等 Effectively-Once | 稳定 `alert_id` 命中 MySQL 主键并执行 Upsert |
+| Kafka → MySQL 整体 | 不宣称严格端到端 Exactly-Once | JDBC Sink 没有 XA 事务，输出提交不与 Checkpoint 两阶段绑定 |
+
+### 一致性恢复原理
+
+```text
+Kafka 消费位置
+      │
+      ├── Kafka Offset
+      ├── Keyed State
+      ├── event_id 去重状态
+      └── EventTime Timer
+              │
+        同一个 Checkpoint
+              │
+        HDFS 持久化存储
+              │
+      故障后从一致点整体恢复
+```
+
+Checkpoint 成功前发生故障时，Flink 会同时回退消费位置、业务状态、去重集合和 Timer，而不是只回退 Kafka Offset。重新消费的数据会在相同状态上下文中再次计算，因此不会出现“Offset 已前进但状态未保存”造成的数据缺口。
+
+### 故障场景
+
+| 故障位置 | 恢复行为 | 最终效果 |
+|---|---|---|
+| 消息读取后、状态更新前失败 | 从最近 Checkpoint Offset 重新消费 | 消息不会丢失 |
+| 状态更新后、Checkpoint 成功前失败 | Offset、状态和 Timer 一起回退 | 重新计算，不保留半完成状态 |
+| Checkpoint 成功后 TaskManager 失败 | 从新 Checkpoint 恢复完整一致点 | 已确认状态不需要从更早位置重建 |
+| MySQL 写入后、Checkpoint 成功前失败 | 告警可能重新计算并再次写入 | 相同 `alert_id` Upsert 原记录，不新增重复行 |
+| 作业取消或计划恢复 | 保留外部化 Checkpoint，按独立状态目录恢复 | 两个作业互不覆盖状态 |
+
+### 双层去重
+
+- 输入层：稳定 `event_id` 保存在 Keyed State 中，抵抗 Producer 重发和 Checkpoint 恢复后的重复消费。
+- 输出层：稳定 `alert_id` 只依赖业务日期、业务键和规则编码，不依赖处理时间、TaskManager 或并行子任务。
+- MySQL 层：`alert_id` 是结果表主键，重复写入更新原告警，使故障窗口中的重复输出最终收敛。
+
+面试中可以将该方案概括为：**Flink 内部是 Exactly-Once State Recovery，MySQL 输出是 Idempotent Effectively-Once，语义边界清晰且不夸大为 XA 端到端精确一次。**
 
 ## 技术栈
 
@@ -73,7 +124,7 @@
 
 ## Flink 作业内部链路
 
-![Flink 风控作业内部处理链路](docs/images/flink-job-pipeline.svg)
+![Flink 风控作业内部处理链路](docs/images/flink-job-pipeline.png)
 
 ### 公共输入阶段
 
@@ -152,7 +203,7 @@
 
 `event_id` 解决输入消息重复，稳定 `alert_id` 解决输出重复。告警 ID 由风险等级前缀、业务日期和业务键哈希生成；相同业务事实在 Kafka 重发、Checkpoint 恢复或人工重跑时会得到相同主键。
 
-## Checkpoint 与一致性边界
+## Checkpoint 参数与恢复配置
 
 两个作业均通过 `StreamExecutionEnvironment.getExecutionEnvironment()` 获取提交环境，并启用以下恢复配置：
 
@@ -167,7 +218,7 @@ Checkpoint 超时：10 分钟
 默认并行度：3
 ```
 
-Checkpoint 保存 Kafka offset、算子状态和 EventTime Timer，因此 Kafka 到 Flink 状态具备 Exactly-Once 恢复语义。JDBC Sink 使用稳定主键 Upsert，使重复结果最终收敛，但没有使用 XA 两阶段提交，所以本项目不宣称 Kafka 到 MySQL 的严格端到端 Exactly-Once。
+两个作业分别使用 `order-risk` 和 `user-risk` 消费组，并写入独立 Checkpoint 子目录。Checkpoint 成功后形成新的恢复一致点；失败的 Checkpoint 不会推进恢复基线。具体故障窗口与输出边界见前文“精确一次语义设计”。
 
 ## MySQL 结果表
 
@@ -220,7 +271,7 @@ realtime_risk/
 ├── docs/
 │   ├── design.md                        # 状态、Timer、主键和代码级设计
 │   ├── deployment.md                    # 集群配置、提交与恢复说明
-│   └── images/                          # SVG 架构图与结果截图
+│   └── images/                          # PNG 架构图与结果截图
 ├── flink/
 │   ├── pom.xml                          # Java 17 / Flink 1.19.1 Maven 工程
 │   └── src/
