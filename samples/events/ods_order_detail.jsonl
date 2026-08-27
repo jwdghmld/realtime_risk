@@ -1,0 +1,2 @@
+{"event_id":"sample:detail:5001","event_type":"ORDER_DETAIL","event_time":"2026-08-25 10:00:11.000","business_date":"20260825","order_detail_id":5001,"order_id":1001,"sku_id":8001,"sku_num":1,"original_amount":80.00,"final_amount":80.00,"create_time":"2026-08-25 10:00:11.000"}
+{"event_id":"sample:detail:5999","event_type":"ORDER_DETAIL","event_time":"2026-08-25 10:20:00.000","business_date":"20260825","order_detail_id":5999,"order_id":1999,"sku_id":8001,"sku_num":1,"original_amount":1.00,"final_amount":1.00,"create_time":"2026-08-25 10:20:00.000"}
