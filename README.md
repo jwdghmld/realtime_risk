@@ -171,6 +171,20 @@ Checkpoint 成功前发生故障时，Flink 会同时回退消费位置、业务
 
 两个规则均使用 10 秒滑动步长和 180 秒冷却时间，避免同一段高风险行为在相邻窗口连续刷出重复告警。用户状态 TTL 为 10 分钟。
 
+## Flink Web UI 运行截图
+
+### 订单风险作业
+
+Flink Web UI 中可以查看订单作业的运行状态、Source 算子、订单规则算子、当前并行度和 Task 状态。
+
+![订单风险作业 Flink Web UI](docs/images/orders.png)
+
+### 用户风险作业
+
+Flink Web UI 中可以查看用户风险作业的运行状态、Source 算子、规则算子、当前并行度和数据处理指标。
+
+![用户风险作业 Flink Web UI](docs/images/user.png)
+
 ## 事件时间与乱序处理
 
 本项目只使用消息中的 `event_time` 推进业务时间，不以机器处理时间替代事件时间。
