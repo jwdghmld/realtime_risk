@@ -1,0 +1,26 @@
+name: realtime-risk-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  java-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Test and package
+        working-directory: flink
+        run: mvn --batch-mode test package
+
+  shell-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell syntax
+        run: bash -n kafka/create-topics.sh config/realtime-env.sh
